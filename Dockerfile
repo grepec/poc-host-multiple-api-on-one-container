@@ -27,10 +27,21 @@ FROM build-apib AS publish-apib
 ARG BUILD_CONFIGURATION=Release
 RUN dotnet publish "./API.B.csproj" -c $BUILD_CONFIGURATION -o /app/publish/API.B /p:UseAppHost=false
 
+FROM node:18 AS build-react
+WORKDIR /app
+COPY react-app/package.json ./
+RUN npm install
+COPY react-app ./
+RUN npm run build
 
 # Final stage
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app
+
+# Install Node.js and npx
+RUN apt-get update && apt-get install -y curl && \
+    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt-get install -y nodejs
 
 # Install Traefik
 ADD https://github.com/traefik/traefik/releases/download/v2.10.0/traefik_v2.10.0_linux_amd64.tar.gz /traefik.tar.gz
@@ -40,6 +51,8 @@ RUN tar -zxvf /traefik.tar.gz -C /usr/local/bin/ \
 # Copy APIs
 COPY --from=publish-apia /app/publish/API.A /app/API.A
 COPY --from=publish-apib /app/publish/API.B /app/API.B
+
+COPY --from=build-react /app/dist /app/react-app
 
 # Create traefik.toml
 RUN mkdir -p /etc/traefik && \
@@ -70,6 +83,10 @@ RUN echo 'http:\n\
       stripPrefix:\n\
         prefixes:\n\
           - "/api2"\n\
+    strip-static:\n\
+      stripPrefix:\n\
+        prefixes:\n\
+          - "/static"\n\
 \n\
   services:\n\
     api1:\n\
@@ -80,6 +97,14 @@ RUN echo 'http:\n\
       loadBalancer:\n\
         servers:\n\
           - url: "http://localhost:5002"\n\
+    static:\n\
+      loadBalancer:\n\
+        servers:\n\
+          - url: "http://localhost:5003"\n\
+    assets:\n\
+      loadBalancer:\n\
+        servers:\n\
+          - url: "http://localhost:5003"\n\
 \n\
   routers:\n\
     api1:\n\
@@ -92,6 +117,14 @@ RUN echo 'http:\n\
       service: "api2"\n\
       middlewares:\n\
         - strip-api2\n\
+    static:\n\
+      rule: "PathPrefix(`/static`)" \n\
+      service: "static"\n\
+      middlewares:\n\
+        - strip-static\n\
+    assets:\n\
+      rule: "PathPrefix(`/assets`)" \n\
+      service: "assets"\n\
 ' > /etc/traefik/dynamic.yaml
 
 # Create start script
@@ -110,6 +143,11 @@ API1_PID=$!\n\
 cd /app/API.B\n\
 dotnet API.B.dll --urls="http://localhost:5002" &\n\
 API2_PID=$!\n\
+\n\
+# Start static content server\n\
+cd /app/react-app\n\
+npx http-server -p 5003 &\n\
+STATIC_PID=$!\n\
 \n\
 # Handle shutdown\n\
 trap "kill $TRAEFIK_PID $API1_PID $API2_PID" SIGTERM\n\
